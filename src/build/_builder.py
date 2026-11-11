@@ -275,7 +275,7 @@ class ProjectBuilder:
     @property
     def host_requires(self) -> set[str]:
         """
-        The host (target platform) dependencies defined in the ``pyproject.toml``'s
+        The host platform dependencies defined in the ``pyproject.toml``'s
         ``build-system.host-requires`` field, used for cross builds.
         """
         return set(self._build_system.get('host-requires', ()))
@@ -298,7 +298,7 @@ class ProjectBuilder:
         :attr:`host_requires` for a cross build.
 
         :param config_settings: Config settings for the build backend
-        :param build_details: The parsed ``build-details.json`` of the target
+        :param build_details: The parsed ``build-details.json`` of the host
         """
         _ctx.log('Getting host build dependencies for wheel...', kind=('step',))
         hook_name = 'get_host_requires_for_cross_build_wheel'
@@ -409,13 +409,13 @@ class ProjectBuilder:
         toolchain: Mapping[str, str] | None = None,
     ) -> str:
         """
-        Cross build a wheel for the target described by ``build_details``.
+        Cross build a wheel for the host described by ``build_details``.
 
         :param output_directory: Directory to put the built wheel in
         :param config_settings: Config settings for the build backend
         :param metadata_directory: If provided, should be the return value of a
             previous ``prepare`` call
-        :param build_details: The parsed ``build-details.json`` of the target
+        :param build_details: The parsed ``build-details.json`` of the host
         :param host_requires_directory: Directory where the host requirements
             have been installed
         :param toolchain: Mapping describing the cross toolchain (``CC``, ``CXX``, ...)

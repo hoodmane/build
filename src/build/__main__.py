@@ -704,7 +704,7 @@ def main_parser() -> argparse.ArgumentParser:
     cross_group.add_argument(
         '--build-details',
         help='cross build wheels for the host platform described by this PEP 739 ``build-details.json`` file '
-        '(e.g. ``<prefix>/lib/python3.X/build-details.json`` of the target Python installation). '
+        '(e.g. ``<prefix>/lib/python3.X/build-details.json`` of the host Python installation). '
         'The build backend must support the ``cross_build_wheel`` hook',
         metavar='PATH',
     )

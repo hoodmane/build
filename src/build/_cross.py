@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-Support for cross builds: building a wheel for a *host* (target) platform that
+Support for cross builds: building a wheel for a *host* platform that
 differs from the *build* platform the frontend is running on.
 
 The host platform is described by a :pep:`739` ``build-details.json`` document.
