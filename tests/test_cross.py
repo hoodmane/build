@@ -499,6 +499,47 @@ def test_project_builder_cross_build_hook_missing(
         builder.cross_build(tmp_path, build_details=cross_config.build_details)
 
 
+def test_project_builder_get_build_requires(package_test_cross: str, package_test_no_prepare: str) -> None:
+    assert build.ProjectBuilder(package_test_cross).get_build_requires_for_cross_build({}, make_build_details()) == {
+        'build-extra == 1.0'
+    }
+    # backends that do not define the hook fall back to get_requires_for_build_wheel (undefined here)
+    assert build.ProjectBuilder(package_test_no_prepare).get_build_requires_for_cross_build({}, make_build_details()) == set()
+
+
+def test_cross_build_isolated_installs_cross_build_requires(
+    mocker: pytest_mock.MockerFixture, package_test_cross: str, cross_config: CrossBuildConfig
+) -> None:
+    cross_build = mocker.patch('build.ProjectBuilder.cross_build', return_value='something.whl')
+    mocker.patch('build.ProjectBuilder.supports_cross_build', return_value=True)
+    mocker.patch('build.ProjectBuilder.get_host_requires_for_cross_build', return_value=set())
+    get_requires = mocker.patch('build.ProjectBuilder.get_requires_for_build')
+    get_build_requires = mocker.patch('build.ProjectBuilder.get_build_requires_for_cross_build', return_value={'build-extra'})
+    install = mocker.patch('build.env.DefaultIsolatedEnv.install')
+    mocker.patch('build.__main__.install_host_requirements')
+    mocker.patch('build.__main__._log_dependency_versions')
+
+    build.__main__.build_package(package_test_cross, '.', ['wheel'], cross=cross_config)
+
+    get_build_requires.assert_called_once_with(None, cross_config.build_details)
+    get_requires.assert_not_called()
+    install.assert_any_call({'build-extra'}, constraints_txt_path=None)
+    cross_build.assert_called_once()
+
+
+def test_cross_build_no_isolation_checks_cross_build_requires(
+    mocker: pytest_mock.MockerFixture, package_test_cross: str, cross_config: CrossBuildConfig
+) -> None:
+    mocker.patch('build.__main__.install_host_requirements')
+    error = mocker.patch('build.__main__._error', side_effect=SystemExit)
+
+    with pytest.raises(SystemExit):
+        build.__main__.build_package(package_test_cross, '.', ['wheel'], isolation=False, cross=cross_config)
+
+    # the test backend's get_build_requires_for_cross_build_wheel requires a package that is not installed
+    assert 'build-extra' in error.call_args.args[0]
+
+
 def test_project_builder_get_host_requires(package_test_cross: str, package_test_no_prepare: str) -> None:
     assert build.ProjectBuilder(package_test_cross).get_host_requires_for_cross_build({}, make_build_details()) == {
         'host-extra == 1.0'

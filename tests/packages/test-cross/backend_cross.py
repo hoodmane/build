@@ -7,6 +7,10 @@ def get_requires_for_build_wheel(config_settings=None):
     return []
 
 
+def get_build_requires_for_cross_build_wheel(config_settings=None, build_details=None):
+    return ['build-extra == 1.0']
+
+
 def get_host_requires_for_cross_build_wheel(config_settings=None, build_details=None):
     return ['host-extra == 1.0']
 

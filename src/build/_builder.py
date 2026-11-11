@@ -288,6 +288,29 @@ class ProjectBuilder:
             features = self._hook._supported_features()
         return 'cross_build_wheel' in features
 
+    def get_build_requires_for_cross_build(
+        self,
+        config_settings: ConfigSettings | None = None,
+        build_details: BuildDetails | None = None,
+    ) -> set[str]:
+        """
+        Return the dependencies defined by the backend in addition to
+        :attr:`build_system_requires` for a cross build of a wheel. These are
+        installed into the build environment.
+
+        Falls back to ``get_requires_for_build_wheel`` if the backend does not
+        define ``get_build_requires_for_cross_build_wheel``.
+
+        :param config_settings: Config settings for the build backend
+        :param build_details: The parsed ``build-details.json`` of the host
+        """
+        _ctx.log('Getting build dependencies for cross wheel...', kind=('step',))
+        hook_name = 'get_build_requires_for_cross_build_wheel'
+
+        with self._handle_backend(hook_name):
+            requires = self._hook.get_build_requires_for_cross_build_wheel(config_settings, build_details)
+            return set(requires)
+
     def get_host_requires_for_cross_build(
         self,
         config_settings: ConfigSettings | None = None,

@@ -65,7 +65,7 @@ from build._cross import (
     toolchain_from_environment,
 )
 from build._exceptions import BuildBackendException, BuildException, FailedProcessError
-from build._util import format_unmet_dependencies
+from build._util import check_dependency, format_unmet_dependencies
 from build.env import DefaultIsolatedEnv
 
 
@@ -219,8 +219,10 @@ def _bootstrap_build_env(
     installer: _env.Installer,
     env_dir: str | None = None,
     runner: SubprocessRunner | None = None,
+    cross: CrossBuildConfig | None = None,
 ) -> Generator[ProjectBuilder]:
     runner = runner or pyproject_hooks.default_subprocess_runner
+    cross_wheel = cross is not None and distribution == 'wheel'
     if isolation:
         with DefaultIsolatedEnv(installer=installer, path=env_dir) as env:
             builder = ProjectBuilder.from_isolated_env(env, srcdir, runner=runner)
@@ -230,7 +232,10 @@ def _bootstrap_build_env(
             # first install the build dependencies
             install(builder.build_system_requires, _fresh=True)
             # then get the extra required dependencies from the backend (which was installed in the call above :P)
-            extra_requires = builder.get_requires_for_build(distribution, config_settings)
+            if cross_wheel:
+                extra_requires = builder.get_build_requires_for_cross_build(config_settings, cross.build_details)
+            else:
+                extra_requires = builder.get_requires_for_build(distribution, config_settings)
             install(extra_requires)
 
             _log_dependency_versions(env, builder.build_system_requires | extra_requires)
@@ -240,9 +245,16 @@ def _bootstrap_build_env(
     else:
         builder = ProjectBuilder(srcdir, runner=runner)
 
-        if not skip_dependency_check and (missing := builder.check_dependencies(distribution, config_settings)):
-            _cprint()
-            _error(format_unmet_dependencies(missing))
+        if not skip_dependency_check:
+            if cross_wheel:
+                dependencies = builder.get_build_requires_for_cross_build(config_settings, cross.build_details)
+                dependencies |= builder.build_system_requires
+                missing = {u for d in dependencies for u in check_dependency(d)}
+            else:
+                missing = builder.check_dependencies(distribution, config_settings)
+            if missing:
+                _cprint()
+                _error(format_unmet_dependencies(missing))
 
         yield builder
 
@@ -278,6 +290,7 @@ def _build(
         installer,
         env_dir,
         pyproject_hooks.quiet_subprocess_runner if _ctx.verbosity < 0 else None,
+        cross,
     ) as builder:
         if cross is None or distribution == 'sdist':
             return builder.build(distribution, outdir, config_settings)
