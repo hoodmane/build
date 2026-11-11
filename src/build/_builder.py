@@ -298,8 +298,9 @@ class ProjectBuilder:
         :attr:`build_system_requires` for a cross build of a wheel. These are
         installed into the build environment.
 
-        Falls back to ``get_requires_for_build_wheel`` if the backend does not
-        define ``get_build_requires_for_cross_build_wheel``.
+        ``get_requires_for_build_wheel`` is not consulted for cross builds; if
+        the backend does not define ``get_build_requires_for_cross_build_wheel``
+        the result is empty.
 
         :param config_settings: Config settings for the build backend
         :param build_details: The parsed ``build-details.json`` of the host

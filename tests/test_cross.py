@@ -503,7 +503,7 @@ def test_project_builder_get_build_requires(package_test_cross: str, package_tes
     assert build.ProjectBuilder(package_test_cross).get_build_requires_for_cross_build({}, make_build_details()) == {
         'build-extra == 1.0'
     }
-    # backends that do not define the hook fall back to get_requires_for_build_wheel (undefined here)
+    # backends that do not define the hook contribute nothing (no fallback to get_requires_for_build_wheel)
     assert build.ProjectBuilder(package_test_no_prepare).get_build_requires_for_cross_build({}, make_build_details()) == set()
 
 
