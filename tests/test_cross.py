@@ -200,11 +200,17 @@ def test_toolchain_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv('CC', 'aarch64-linux-gnu-gcc')
     monkeypatch.setenv('CFLAGS', '-O2')
+    monkeypatch.setenv('PKG_CONFIG_LIBDIR', '/sysroot/usr/lib/pkgconfig')
     monkeypatch.setenv('UNRELATED', 'x')
-    assert build._cross.toolchain_from_environment() == {'CC': 'aarch64-linux-gnu-gcc', 'CFLAGS': '-O2'}
+    assert build._cross.toolchain_from_environment() == {
+        'CC': 'aarch64-linux-gnu-gcc',
+        'CFLAGS': '-O2',
+        'PKG_CONFIG_LIBDIR': '/sysroot/usr/lib/pkgconfig',
+    }
     assert build._cross.toolchain_from_environment({'CC': 'clang', 'AR': 'llvm-ar'}) == {
         'CC': 'clang',
         'CFLAGS': '-O2',
+        'PKG_CONFIG_LIBDIR': '/sysroot/usr/lib/pkgconfig',
         'AR': 'llvm-ar',
     }
 
