@@ -1,0 +1,5 @@
+[build-system]
+requires = []
+host-requires = ["numpy", "pywin32; sys_platform == 'win32'", "cffi; platform_machine == 'aarch64'"]
+build-backend = "backend_cross"
+backend-path = ["."]
