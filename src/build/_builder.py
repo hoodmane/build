@@ -41,12 +41,19 @@ if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Mapping, Sequence
     from typing import NotRequired, Self, TypedDict, TypeGuard
 
-    from ._types import ConfigSettings, Distribution, StrPath, SubprocessRunner, TOMLValue
+    from ._types import ConfigSettings, Distribution, JSONValue, StrPath, SubprocessRunner, TOMLValue
+
+    BuildDetails = Mapping[str, JSONValue]
 
     # The validated ``[build-system]`` table.
     BuildSystemTable = TypedDict(
         'BuildSystemTable',
-        {'requires': list[str], 'build-backend': str, 'backend-path': NotRequired[list[str]]},
+        {
+            'requires': list[str],
+            'build-backend': str,
+            'backend-path': NotRequired[list[str]],
+            'host-requires': NotRequired[list[str]],
+        },
     )
 
 
@@ -138,21 +145,30 @@ def _parse_build_system_table(pyproject_toml: Mapping[str, TOMLValue]) -> BuildS
             # but leave ``requires`` intact to emulate pip
             _find_typo(build_system, 'build-backend')
 
-    match build_system:
-        case {'backend-path': backend_path} if _is_list_of_str(backend_path):
-            table['backend-path'] = backend_path
-        case {'backend-path': _}:
-            msg = '`backend-path` must be an array of strings'
-            raise BuildSystemTableValidationError(msg)
-        case _:
-            pass
+    for key in ('backend-path', 'host-requires'):
+        if (value := _parse_optional_str_list(build_system, key)) is not None:
+            table[key] = value
 
-    unknown_props = build_system.keys() - {'requires', 'build-backend', 'backend-path'}
+    unknown_props = build_system.keys() - {'requires', 'build-backend', 'backend-path', 'host-requires'}
     if unknown_props:
         msg = f'Unknown properties: {", ".join(unknown_props)}'
         raise BuildSystemTableValidationError(msg)
 
     return table
+
+
+def _parse_optional_str_list(build_system: Mapping[str, TOMLValue], key: str) -> list[str] | None:
+    match build_system:
+        case {**rest} if key in rest and _is_list_of_str(rest[key]):
+            value: list[str] = rest[key]  # pyrefly: ignore[bad-assignment]
+            return value
+        case {**rest} if key in rest:
+            msg = f'`{key}` must be an array of strings'
+            raise BuildSystemTableValidationError(msg)
+        case _:
+            if key == 'host-requires':
+                _find_typo(build_system, key)
+            return None
 
 
 def _validate_backend_path(source_dir: str, backend_paths: Sequence[str]) -> None:
@@ -256,6 +272,41 @@ class ProjectBuilder:
         """
         return set(self._build_system['requires'])
 
+    @property
+    def host_requires(self) -> set[str]:
+        """
+        The host (target platform) dependencies defined in the ``pyproject.toml``'s
+        ``build-system.host-requires`` field, used for cross builds.
+        """
+        return set(self._build_system.get('host-requires', ()))
+
+    def supports_cross_build(self) -> bool:
+        """
+        Return whether the backend implements the ``cross_build_wheel`` hook.
+        """
+        with self._handle_backend('_supported_features'):
+            features = self._hook._supported_features()
+        return 'cross_build_wheel' in features
+
+    def get_host_requires_for_cross_build(
+        self,
+        config_settings: ConfigSettings | None = None,
+        build_details: BuildDetails | None = None,
+    ) -> set[str]:
+        """
+        Return the host dependencies defined by the backend in addition to
+        :attr:`host_requires` for a cross build.
+
+        :param config_settings: Config settings for the build backend
+        :param build_details: The parsed ``build-details.json`` of the target
+        """
+        _ctx.log('Getting host build dependencies for wheel...', kind=('step',))
+        hook_name = 'get_host_requires_for_cross_build_wheel'
+
+        with self._handle_backend(hook_name):
+            requires = self._hook.get_host_requires_for_cross_build_wheel(config_settings, build_details)
+            return set(requires)
+
     def get_requires_for_build(
         self,
         distribution: Distribution,
@@ -347,6 +398,46 @@ class ProjectBuilder:
         kwargs = {} if metadata_directory is None else {'metadata_directory': metadata_directory}
         return self._call_backend(f'build_{distribution}', output_directory, config_settings, **kwargs)
 
+    def cross_build(
+        self,
+        output_directory: StrPath,
+        config_settings: ConfigSettings | None = None,
+        metadata_directory: str | None = None,
+        *,
+        build_details: BuildDetails,
+        host_requires_directory: str | None = None,
+        toolchain: Mapping[str, str] | None = None,
+    ) -> str:
+        """
+        Cross build a wheel for the target described by ``build_details``.
+
+        :param output_directory: Directory to put the built wheel in
+        :param config_settings: Config settings for the build backend
+        :param metadata_directory: If provided, should be the return value of a
+            previous ``prepare`` call
+        :param build_details: The parsed ``build-details.json`` of the target
+        :param host_requires_directory: Directory where the host requirements
+            have been installed
+        :param toolchain: Mapping describing the cross toolchain (``CC``, ``CXX``, ...)
+        :returns: The full path to the built wheel
+        """
+        _ctx.log('Cross building wheel...', kind=('step',))
+
+        kwargs: dict[str, BuildDetails | Mapping[str, str] | str | None] = {
+            'build_details': build_details,
+            'host_requires_directory': host_requires_directory,
+            'toolchain': toolchain,
+        }
+        if metadata_directory is not None:
+            kwargs['metadata_directory'] = metadata_directory
+        try:
+            return self._call_backend('cross_build_wheel', output_directory, config_settings, **kwargs)
+        except BuildBackendException as exception:
+            if isinstance(exception.exception, pyproject_hooks.HookMissing):
+                msg = f"Backend '{self._backend}' does not support cross builds (no `cross_build_wheel` hook)."
+                raise BuildBackendException(exception.exception, msg) from None
+            raise
+
     def metadata_path(self, output_directory: StrPath, config_settings: ConfigSettings | None = None) -> str:
         """
         Generate the metadata directory of a distribution and return its path.
@@ -388,7 +479,11 @@ class ProjectBuilder:
         return os.path.join(output_directory, distinfo)
 
     def _call_backend(
-        self, hook_name: str, outdir: StrPath, config_settings: ConfigSettings | None = None, **kwargs: str | bool
+        self,
+        hook_name: str,
+        outdir: StrPath,
+        config_settings: ConfigSettings | None = None,
+        **kwargs: BuildDetails | Mapping[str, str] | str | bool | None,
     ) -> str:
         outdir = os.path.abspath(outdir)
 

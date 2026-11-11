@@ -54,6 +54,7 @@ wheel_files = {
     'build/_builder.py',
     'build/_compat/__init__.py',
     'build/_compat/tarfile.py',
+    'build/_cross.py',
     'build/_ctx.py',
     'build/_exceptions.py',
     'build/_types.py',

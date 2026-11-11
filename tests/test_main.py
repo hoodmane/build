@@ -277,10 +277,28 @@ def test_build_package_passes_config_settings_to_build(mocker: pytest_mock.Mocke
     build_cmd.assert_has_calls(
         [
             unittest.mock.call(
-                False, package_test_flit, '.', 'sdist', config_settings, True, pathlib.Path('constraints.txt'), 'uv', None
+                False,
+                package_test_flit,
+                '.',
+                'sdist',
+                config_settings,
+                True,
+                pathlib.Path('constraints.txt'),
+                'uv',
+                None,
+                None,
             ),
             unittest.mock.call(
-                False, package_test_flit, '.', 'wheel', config_settings, True, pathlib.Path('constraints.txt'), 'uv', None
+                False,
+                package_test_flit,
+                '.',
+                'wheel',
+                config_settings,
+                True,
+                pathlib.Path('constraints.txt'),
+                'uv',
+                None,
+                None,
             ),
         ]
     )
@@ -325,6 +343,7 @@ def test_build_package_via_sdist_passes_config_settings_to_build(mocker: pytest_
                 True,
                 pathlib.Path('constraints.txt'),
                 'uv',
+                None,
                 None,
             ),
         ]

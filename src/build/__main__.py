@@ -55,6 +55,15 @@ import build.env as _env
 
 from build import ProjectBuilder, _ctx
 from build._compat.tarfile import tarfile
+from build._cross import (
+    CrossBuildConfig,
+    filter_host_requirements,
+    install_host_requirements,
+    load_build_details,
+    parse_glibc_version,
+    parse_toolchain_args,
+    toolchain_from_environment,
+)
 from build._exceptions import BuildBackendException, BuildException, FailedProcessError
 from build._util import format_unmet_dependencies
 from build.env import DefaultIsolatedEnv
@@ -85,6 +94,9 @@ class _CliArgs:
     sdist_extract_dir: str | None
     env_dir: str | None
     report: str | None
+    build_details: str | None
+    toolchain: list[str] | None
+    host_glibc_version: str | None
 
 
 _COLORS = {
@@ -254,6 +266,7 @@ def _build(
     dependency_constraints_txt: os.PathLike[str] | None,
     installer: _env.Installer,
     env_dir: str | None = None,
+    cross: CrossBuildConfig | None = None,
 ) -> str:
     with _bootstrap_build_env(
         isolation,
@@ -266,7 +279,52 @@ def _build(
         env_dir,
         pyproject_hooks.quiet_subprocess_runner if _ctx.verbosity < 0 else None,
     ) as builder:
-        return builder.build(distribution, outdir, config_settings)
+        if cross is None or distribution == 'sdist':
+            return builder.build(distribution, outdir, config_settings)
+        if distribution != 'wheel':
+            msg = f'Cannot cross build {distribution}, only wheels can be cross built'
+            raise BuildException(msg)
+        return _cross_build(builder, outdir, config_settings, dependency_constraints_txt, installer, env_dir, cross)
+
+
+def _cross_build(
+    builder: ProjectBuilder,
+    outdir: StrPath,
+    config_settings: ConfigSettings | None,
+    dependency_constraints_txt: os.PathLike[str] | None,
+    installer: _env.Installer,
+    env_dir: str | None,
+    cross: CrossBuildConfig,
+) -> str:
+    if not builder.supports_cross_build():
+        msg = f'Backend {builder._backend!r} does not support cross builds (no `cross_build_wheel` hook).'
+        raise BuildException(msg)
+
+    host_requires = builder.host_requires | builder.get_host_requires_for_cross_build(config_settings, cross.build_details)
+    host_requires = set(filter_host_requirements(host_requires, cross))
+
+    with contextlib.ExitStack() as stack:
+        if env_dir is not None:
+            host_requires_dir = os.path.join(env_dir, 'host-requires')
+            os.makedirs(host_requires_dir, exist_ok=True)
+        else:
+            host_requires_dir = stack.enter_context(tempfile.TemporaryDirectory(prefix='build-host-requires-'))
+
+        install_host_requirements(
+            host_requires,
+            host_requires_dir,
+            cross,
+            installer=installer,
+            constraints_txt_path=dependency_constraints_txt,
+        )
+
+        return builder.cross_build(
+            outdir,
+            config_settings,
+            build_details=cross.build_details,
+            host_requires_directory=host_requires_dir,
+            toolchain=cross.toolchain,
+        )
 
 
 @contextlib.contextmanager
@@ -330,6 +388,7 @@ def build_package(
     dependency_constraints_txt: os.PathLike[str] | None = None,
     installer: _env.Installer = 'pip',
     env_dir: str | None = None,
+    cross: CrossBuildConfig | None = None,
 ) -> list[str]:
     """
     Run the build process.
@@ -341,6 +400,7 @@ def build_package(
     :param isolation: Isolate the build in a separate environment
     :param skip_dependency_check: Do not perform the dependency check
     :param env_dir: Location of the isolated build environment (a temporary directory is used when not set)
+    :param cross: Cross build configuration; wheels are built for the described host platform when set
     """
     built: list[str] = []
     for distribution in distributions:
@@ -354,6 +414,7 @@ def build_package(
             dependency_constraints_txt,
             installer,
             env_dir,
+            cross,
         )
         built.append(os.path.basename(out))
     return built
@@ -370,6 +431,7 @@ def build_package_via_sdist(
     installer: _env.Installer = 'pip',
     sdist_extract_dir: StrPath | None = None,
     env_dir: str | None = None,
+    cross: CrossBuildConfig | None = None,
 ) -> list[str]:
     """
     Build a sdist and then the specified distributions from it.
@@ -383,6 +445,7 @@ def build_package_via_sdist(
     :param sdist_extract_dir: Directory to extract the intermediate sdist into; a temporary directory is used and
         removed afterwards when ``None``
     :param env_dir: Location of the isolated build environment (a temporary directory is used when not set)
+    :param cross: Cross build configuration; wheels are built for the described host platform when set
     """
     if 'sdist' in distributions:
         msg = 'Only binary distributions are allowed but sdist was specified'
@@ -416,6 +479,7 @@ def build_package_via_sdist(
                     dependency_constraints_txt,
                     installer,
                     env_dir,
+                    cross,
                 )
                 built.append(os.path.basename(out))
     return [sdist_name, *built]
@@ -636,6 +700,29 @@ def main_parser() -> argparse.ArgumentParser:
         metavar='JSON_STRING',
     )
 
+    cross_group = parser.add_argument_group('cross build options')
+    cross_group.add_argument(
+        '--build-details',
+        help='cross build wheels for the host platform described by this PEP 739 ``build-details.json`` file '
+        '(e.g. ``<prefix>/lib/python3.X/build-details.json`` of the target Python installation). '
+        'The build backend must support the ``cross_build_wheel`` hook',
+        metavar='PATH',
+    )
+    cross_group.add_argument(
+        '--toolchain',
+        action='append',
+        help='cross toolchain setting passed to the backend, e.g. ``CC=aarch64-linux-gnu-gcc``. '
+        'Multiple settings can be provided. Defaults are taken from the ``CC``, ``CXX``, ``AR``, ``RANLIB``, '
+        '``STRIP`` etc. environment variables',
+        metavar='NAME=VALUE',
+    )
+    cross_group.add_argument(
+        '--host-glibc-version',
+        help='glibc version of a GNU/Linux host, used to select ``manylinux`` wheels for host requirements. '
+        '``build-details.json`` does not record it; defaults to 2.17 (``manylinux2014``)',
+        metavar='MAJOR.MINOR',
+    )
+
     install_group = parser.add_argument_group('installation options')
     env_exclusive_group = install_group.add_mutually_exclusive_group()
     env_exclusive_group.add_argument(
@@ -694,6 +781,15 @@ def _parse_config_settings(raw_config_settings: list[str]) -> dict[str, str | li
     return config_settings
 
 
+def _validate_args(parser: argparse.ArgumentParser, args: _CliArgs) -> None:
+    if args.env_dir is not None and args.no_isolation:
+        parser.error('--env-dir: not allowed with --no-isolation')
+    if args.build_details is None and (args.toolchain or args.host_glibc_version):
+        parser.error('--toolchain and --host-glibc-version: only allowed with --build-details')
+    if args.build_details is not None and args.metadata:
+        parser.error('--build-details: not allowed with --metadata')
+
+
 def main(cli_args: Sequence[str], prog: str | None = None) -> None:
     """
     Parse the CLI arguments and invoke the build process.
@@ -706,8 +802,7 @@ def main(cli_args: Sequence[str], prog: str | None = None) -> None:
         parser.prog = prog
     args = parser.parse_args(cli_args, _CliArgs())
 
-    if args.env_dir is not None and args.no_isolation:
-        parser.error('--env-dir: not allowed with --no-isolation')
+    _validate_args(parser, args)
 
     _setup_cli(verbosity=args.verbosity)
 
@@ -723,6 +818,8 @@ def main(cli_args: Sequence[str], prog: str | None = None) -> None:
         installer=args.installer,
         env_dir=args.env_dir,
     )
+    if args.build_details is not None:
+        run_build = partial(run_build, cross=_resolve_cross_build_config(args))
 
     if args.outdir is not None:
         outdir = args.outdir
@@ -793,6 +890,18 @@ def _describe_artifact(path: str, name: str) -> _ArtifactReport:
         'size': size,
         'hashes': {'sha256': digest.hexdigest()},
     }
+
+
+def _resolve_cross_build_config(args: _CliArgs) -> CrossBuildConfig:
+    assert args.build_details is not None
+    try:
+        return CrossBuildConfig(
+            build_details=load_build_details(args.build_details),
+            toolchain=toolchain_from_environment(parse_toolchain_args(args.toolchain)),
+            glibc_version=parse_glibc_version(args.host_glibc_version) if args.host_glibc_version else None,
+        )
+    except BuildException as e:
+        _error(str(e))
 
 
 def _resolve_config_settings(args: _CliArgs) -> Mapping[str, JSONValue]:
