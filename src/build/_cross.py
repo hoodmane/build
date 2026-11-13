@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import importlib.metadata
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import typing
@@ -21,10 +23,11 @@ import typing
 from packaging.markers import Environment, host_environment
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.tags import host_platform_tags
+from packaging.utils import canonicalize_name
 
 from . import _ctx
 from ._ctx import run_subprocess
-from ._exceptions import BuildException
+from ._exceptions import BuildException, FailedProcessError
 
 
 TYPE_CHECKING = False
@@ -191,6 +194,58 @@ def filter_host_requirements(requirements: Collection[str], cross: CrossBuildCon
     return result
 
 
+def build_environment_versions(python_executable: str, names: Collection[str]) -> dict[str, str]:
+    """
+    Return ``{canonical name: version}`` for the packages in ``names`` that are
+    installed in the environment of ``python_executable``.
+    """
+    wanted = {canonicalize_name(name) for name in names}
+    if not wanted:
+        return {}
+    if python_executable == sys.executable:
+        paths = sys.path
+    else:
+        output = subprocess.run(  # noqa: S603
+            [python_executable, '-Ic', 'import json, sys; print(json.dumps(sys.path))'],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        paths = json.loads(output)
+    return {
+        name: distribution.version
+        for distribution in importlib.metadata.distributions(path=paths)
+        if (name := canonicalize_name(distribution.name)) in wanted
+    }
+
+
+def constrain_to_build_environment(
+    requirements: Collection[str], build_versions: Mapping[str, str]
+) -> tuple[list[str], dict[str, str]]:
+    """
+    Pin host requirements that are also installed in the build environment to
+    the version installed there.
+
+    A package that is both executed on the build machine and compiled against
+    for the host (NumPy, for instance: the build copy runs Cython while the
+    host copy provides the headers) must be the same version on both sides, or
+    the generated code may target a different C API than the headers describe.
+
+    :returns: The constrained requirements and the ``{name: version}`` pins applied.
+    """
+    constrained: list[str] = []
+    pinned: dict[str, str] = {}
+    for requirement_string in requirements:
+        requirement = Requirement(requirement_string)
+        name = canonicalize_name(requirement.name)
+        version = build_versions.get(name)
+        if version is not None and not requirement.url:
+            requirement.specifier &= f'=={version}'
+            pinned[name] = version
+        constrained.append(str(requirement))
+    return constrained, pinned
+
+
 def _uv_python_platform(cross: CrossBuildConfig) -> str:
     """Map the host platform to a ``uv pip install --python-platform`` value."""
     from packaging import _build_details
@@ -233,10 +288,13 @@ def install_host_requirements(
         kind=('step',),
     )
 
-    if installer == 'uv':
-        _install_host_requirements_uv(requirements, target_directory, cross, constraints_txt_path)
-    else:
-        _install_host_requirements_pip(requirements, target_directory, cross, constraints_txt_path)
+    try:
+        if installer == 'uv':
+            _install_host_requirements_uv(requirements, target_directory, cross, constraints_txt_path)
+        else:
+            _install_host_requirements_pip(requirements, target_directory, cross, constraints_txt_path)
+    except subprocess.CalledProcessError as e:
+        raise FailedProcessError(e, 'Failed to install host requirements') from None
 
 
 def _install_host_requirements_pip(

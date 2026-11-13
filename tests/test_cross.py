@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import zipfile
 
@@ -347,6 +349,35 @@ def test_install_host_requirements_empty(mocker: pytest_mock.MockerFixture, cros
     run_subprocess.assert_not_called()
 
 
+def test_constrain_to_build_environment() -> None:
+    requirements = ['numpy>=2', 'pybind11', 'pyarrow<25,>=18', 'cffi']
+    constrained, pinned = build._cross.constrain_to_build_environment(
+        requirements, {'numpy': '2.4.6', 'pybind11': '3.1.0', 'unrelated': '1.0'}
+    )
+    assert constrained == ['numpy==2.4.6,>=2', 'pybind11==3.1.0', 'pyarrow<25,>=18', 'cffi']
+    assert pinned == {'numpy': '2.4.6', 'pybind11': '3.1.0'}
+
+
+def test_constrain_to_build_environment_canonical_names() -> None:
+    constrained, pinned = build._cross.constrain_to_build_environment(['Ruamel.YAML'], {'ruamel-yaml': '0.18'})
+    assert constrained == ['Ruamel.YAML==0.18']
+    assert pinned == {'ruamel-yaml': '0.18'}
+
+
+def test_build_environment_versions_current_interpreter() -> None:
+    versions = build._cross.build_environment_versions(sys.executable, ['packaging', 'Not-Installed-Package'])
+    assert versions == {'packaging': importlib.metadata.version('packaging')}
+
+
+def test_build_environment_versions_other_interpreter(mocker: pytest_mock.MockerFixture) -> None:
+    mocker.patch(
+        'build._cross.subprocess.run',
+        return_value=mocker.Mock(stdout=json.dumps(sys.path)),
+    )
+    versions = build._cross.build_environment_versions('/some/other/python', ['packaging'])
+    assert versions == {'packaging': importlib.metadata.version('packaging')}
+
+
 # -- CLI ----------------------------------------------------------------------
 
 
@@ -437,6 +468,48 @@ def test_cross_build_package(
     assert info['toolchain'] == {'CC': 'aarch64-linux-gnu-gcc'}
     # the temporary host requirements directory is cleaned up
     assert not os.path.exists(target)
+
+
+def test_cross_build_package_pins_host_requirements_to_build_environment(
+    mocker: pytest_mock.MockerFixture,
+    tmp_path: pathlib.Path,
+    package_test_cross: str,
+    cross_config: CrossBuildConfig,
+) -> None:
+    install = mocker.patch('build.__main__.install_host_requirements')
+    # numpy is "installed" in the (non-isolated) build environment at 2.4.6
+    mocker.patch('build.__main__.build_environment_versions', return_value={'numpy': '2.4.6'})
+
+    build.__main__.build_package(
+        package_test_cross, tmp_path / 'dist', ['wheel'], isolation=False, skip_dependency_check=True, cross=cross_config
+    )
+
+    requirements = install.call_args.args[0]
+    assert requirements == {'numpy==2.4.6', 'cffi', 'host-extra==1.0'}
+
+
+def test_cross_build_package_pin_failure_hint(
+    mocker: pytest_mock.MockerFixture,
+    tmp_path: pathlib.Path,
+    package_test_cross: str,
+    cross_config: CrossBuildConfig,
+) -> None:
+    error = subprocess.CalledProcessError(1, ['pip'])
+    mocker.patch(
+        'build.__main__.install_host_requirements',
+        side_effect=build.FailedProcessError(error, 'Failed to install host requirements'),
+    )
+    mocker.patch('build.__main__.build_environment_versions', return_value={'numpy': '2.5.4'})
+
+    with pytest.raises(build.BuildException, match='constrained to the versions installed in the build environment'):
+        build.__main__.build_package(
+            package_test_cross,
+            tmp_path / 'dist',
+            ['wheel'],
+            isolation=False,
+            skip_dependency_check=True,
+            cross=cross_config,
+        )
 
 
 def test_cross_build_package_env_dir(

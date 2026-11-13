@@ -47,6 +47,7 @@ from typing import NoReturn, TextIO, TypedDict
 
 import pyproject_hooks
 
+from packaging.requirements import Requirement
 from packaging.utils import InvalidSdistFilename, parse_sdist_filename
 from packaging.version import InvalidVersion
 
@@ -57,6 +58,8 @@ from build import ProjectBuilder, _ctx
 from build._compat.tarfile import tarfile
 from build._cross import (
     CrossBuildConfig,
+    build_environment_versions,
+    constrain_to_build_environment,
     filter_host_requirements,
     install_host_requirements,
     load_build_details,
@@ -314,7 +317,20 @@ def _cross_build(
         raise BuildException(msg)
 
     host_requires = builder.host_requires | builder.get_host_requires_for_cross_build(config_settings, cross.build_details)
-    host_requires = set(filter_host_requirements(host_requires, cross))
+    host_requires_list = filter_host_requirements(host_requires, cross)
+
+    # Packages present in both the build environment and the host requirements
+    # must match: the build copy is executed (e.g. by Cython) and the host copy
+    # is compiled against, so their C APIs have to agree.
+    build_versions = build_environment_versions(builder.python_executable, [Requirement(r).name for r in host_requires_list])
+    host_requires_list, pinned = constrain_to_build_environment(host_requires_list, build_versions)
+    if pinned:
+        _ctx.log(
+            'Constraining host requirements to the build environment versions:\n'
+            + '\n'.join(f'- {name}=={version}' for name, version in sorted(pinned.items())),
+            kind=('step',),
+        )
+    host_requires = set(host_requires_list)
 
     with contextlib.ExitStack() as stack:
         if env_dir is not None:
@@ -323,13 +339,25 @@ def _cross_build(
         else:
             host_requires_dir = stack.enter_context(tempfile.TemporaryDirectory(prefix='build-host-requires-'))
 
-        install_host_requirements(
-            host_requires,
-            host_requires_dir,
-            cross,
-            installer=installer,
-            constraints_txt_path=dependency_constraints_txt,
-        )
+        try:
+            install_host_requirements(
+                host_requires,
+                host_requires_dir,
+                cross,
+                installer=installer,
+                constraints_txt_path=dependency_constraints_txt,
+            )
+        except FailedProcessError as e:
+            if pinned:
+                hint = ', '.join(f'{name} {version}' for name, version in sorted(pinned.items()))
+                msg = (
+                    f'{e}\n'
+                    f'Host requirements were constrained to the versions installed in the build environment '
+                    f'({hint}); if no wheel for the host platform exists at those versions, constrain the build '
+                    f'environment to a version that is available for the host with --dependency-constraints-txt.'
+                )
+                raise BuildException(msg) from None
+            raise
 
         return builder.cross_build(
             outdir,
